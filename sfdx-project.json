@@ -2,11 +2,19 @@
   "packageDirectories": [
     {
       "path": "force-app",
-      "default": true
+      "default": true,
+      "package": "Apex HTTP Mock",
+      "versionName": "1.0.0",
+      "versionNumber": "1.0.0.NEXT",
+      "versionDescription": "Configurable HttpCalloutMock for Apex tests: match callouts, return response sequences, inspect received requests."
     }
   ],
   "name": "apex-http-mock-test-utility",
   "namespace": "",
   "sfdcLoginUrl": "https://login.salesforce.com",
-  "sourceApiVersion": "66.0"
+  "sourceApiVersion": "66.0",
+  "packageAliases": {
+    "Apex HTTP Mock": "0HoQy00000027evKAA",
+    "Apex HTTP Mock@1.0.0-2": "04tQy000000ZyanIAC"
+  }
 }

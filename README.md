@@ -25,7 +25,17 @@ HttpMock.instance.assertAllResponsesReturned();
 
 ## Install
 
-Copy `HttpMock.cls` and `HttpMockTest.cls` (with their `-meta.xml` files) from
+Install the unlocked package (no namespace), version 1.0.0:
+
+```sh
+sf package install --package 04tQy000000ZyanIAC --target-org <your-org> --wait 10
+```
+
+Or use the install link for a
+[production or Developer Edition org](https://login.salesforce.com/packaging/installPackage.apexp?p0=04tQy000000ZyanIAC)
+or a [sandbox](https://test.salesforce.com/packaging/installPackage.apexp?p0=04tQy000000ZyanIAC).
+
+You can also copy `HttpMock.cls` and `HttpMockTest.cls` (with their `-meta.xml` files) from
 [`force-app/main/default/classes`](force-app/main/default/classes) into your project, or deploy them
 from a clone of this repository:
 
@@ -33,8 +43,8 @@ from a clone of this repository:
 sf project deploy start --source-dir force-app --target-org <your-org>
 ```
 
-`HttpMock` isn't annotated with `@IsTest`, so it counts toward your org's code coverage. Deploy
-`HttpMockTest` with it: the tests cover every line except the ones that fail a test on purpose.
+`HttpMock` is annotated with `@IsTest`, so it doesn't count toward your org's code coverage or Apex code
+size limit. Only test code can use it.
 
 ## Usage
 

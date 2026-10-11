@@ -39,6 +39,7 @@
  * HttpMock.instance.assertAllResponsesReturned();
  * HttpRequest retry = HttpMock.instance.getReceivedRequests(createPatient)[1];
  */
+@IsTest
 public class HttpMock implements HttpCalloutMock {
 
     public static HttpMock instance {
