@@ -1,0 +1,201 @@
+name: Salesforce PR validation
+
+# Runs a PMD scan, then check-only deploys the PR's merge result (source merged into
+# target) to a fresh scratch org, runs the Apex tests there, and deletes the org.
+# No real org is changed.
+#
+# No `paths:` filter on purpose: this job is a required status check, and a check
+# that never runs blocks the PR forever.
+# Draft PRs are skipped to save the Dev Hub's scratch org limits. A skipped job counts
+# as passed, but a draft can't be merged, and marking it ready for review runs the check.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SF_CLI_VERSION: 2.151.7
+  CODE_ANALYZER_VERSION: 5.16.0
+  PMD_SEVERITY_THRESHOLD: 2
+
+  SF_AUTOUPDATE_DISABLE: 'true'
+  SF_DISABLE_TELEMETRY: 'true'
+  SF_USE_PROGRESS_BAR: 'false'
+
+  DEVHUB_ALIAS: devhub
+  SCRATCH_ALIAS: ci-scratch
+  # Identifies this run's scratch org on the Dev Hub, so cleanup can find it.
+  SCRATCH_DESCRIPTION: CI ${{ github.repository }} run ${{ github.run_id }}-${{ github.run_attempt }}
+  # The Dev Hub login is a bare access token, so the CLI authorizes the new scratch org
+  # through its built-in connected app (PlatformCLI) and that app's callback URL.
+  SF_SCRATCH_SIGNUP_CONNECTED_APP: PlatformCLI
+  SF_SCRATCH_SIGNUP_CALLBACK_URL: http://localhost:1717/OauthRedirect
+
+jobs:
+  validate:
+    # Keep this name stable: it is referenced by branch protection as a required check.
+    name: Validate deploy + Apex tests
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Holds the Dev Hub credentials (SF_CONSUMER_KEY and SF_CONSUMER_SECRET secrets, and
+    # the SF_INSTANCE_URL variable: the Dev Hub's My Domain URL).
+    environment: devhub
+
+    steps:
+      - name: Check out merged code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      # Pinned, so a new CLI or plugin release can't change the check, or see the Dev Hub
+      # credentials, without a change here.
+      - name: Install Salesforce CLI
+        run: |
+          npm install --global "@salesforce/cli@$SF_CLI_VERSION"
+          sf plugins install "code-analyzer@$CODE_ANALYZER_VERSION"
+          sf version
+
+      # Static analysis needs no org, so it runs first: PMD failures don't use up a
+      # scratch org from the Dev Hub's daily limit.
+      # Only rules that can fail the check run (severity 1 to PMD_SEVERITY_THRESHOLD;
+      # 1 is the most severe), so the table lists just the failing violations.
+      - name: Run PMD scan
+        run: |
+          rule_selectors=()
+          for severity in $(seq 1 "$PMD_SEVERITY_THRESHOLD"); do
+            rule_selectors+=(--rule-selector "pmd:Recommended:$severity")
+          done
+          sf code-analyzer run \
+            "${rule_selectors[@]}" \
+            --workspace force-app \
+            --severity-threshold "$PMD_SEVERITY_THRESHOLD" \
+            --view table
+
+      # GitHub doesn't pass secrets to pull requests from forks, so the Dev Hub steps
+      # can't run for them. Fail with a clear message instead of a login error.
+      - name: Check Dev Hub secrets
+        env:
+          SF_CONSUMER_SECRET: ${{ secrets.SF_CONSUMER_SECRET }}
+        run: |
+          if [ -z "$SF_CONSUMER_SECRET" ]; then
+            echo "::error::Dev Hub secrets aren't available (pull requests from forks don't get them). A maintainer can validate the change by pushing the branch to this repository."
+            exit 1
+          fi
+
+      # OAuth client credentials flow: Salesforce returns an access token for the connected
+      # app's "Run As" user, and accepts the request only at the My Domain URL. The CLI
+      # can't refresh this token, but it lasts for the org's session timeout, longer than
+      # the job.
+      - name: Log in to Dev Hub (client credentials)
+        env:
+          SF_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+          SF_CONSUMER_SECRET: ${{ secrets.SF_CONSUMER_SECRET }}
+          SF_INSTANCE_URL: ${{ vars.SF_INSTANCE_URL }}
+        run: |
+          if ! token_response=$(curl --silent --show-error --fail-with-body \
+              --data-urlencode grant_type=client_credentials \
+              --data-urlencode "client_id=$SF_CONSUMER_KEY" \
+              --data-urlencode "client_secret=$SF_CONSUMER_SECRET" \
+              "$SF_INSTANCE_URL/services/oauth2/token"); then
+            error=$(jq -r '.error_description // .error // .' <<< "$token_response" 2>/dev/null)
+            echo "::error::Dev Hub token request failed: $error"
+            exit 1
+          fi
+          access_token=$(jq -r .access_token <<< "$token_response")
+          echo "::add-mask::$access_token"
+          # sf reads the token from SF_ACCESS_TOKEN; there is no flag for it.
+          SF_ACCESS_TOKEN="$access_token" sf org login access-token \
+            --instance-url "$SF_INSTANCE_URL" \
+            --alias "$DEVHUB_ALIAS" \
+            --no-prompt
+
+      # The Dev Hub's scratch org limits are shared with other projects. Checking them
+      # first turns a used-up limit into a clear message instead of a signup error.
+      - name: Check scratch org limits
+        run: |
+          limits=$(sf org list limits --target-org "$DEVHUB_ALIAS" --json)
+          for name in ActiveScratchOrgs DailyScratchOrgs; do
+            remaining=$(jq -r --arg name "$name" \
+              '.result[] | select(.name == $name) | .remaining' <<< "$limits")
+            if [ "$remaining" -lt 1 ]; then
+              echo "::error::No $name left on the Dev Hub. Delete an unused scratch org or wait for the daily limit to reset, then re-run."
+              exit 1
+            fi
+          done
+
+      # --duration-days 1: an org that cleanup misses expires on its own.
+      # --wait values are in minutes.
+      - name: Create scratch org
+        run: |
+          sf org create scratch \
+            --target-dev-hub "$DEVHUB_ALIAS" \
+            --definition-file config/project-scratch-def.json \
+            --alias "$SCRATCH_ALIAS" \
+            --duration-days 1 \
+            --no-track-source \
+            --description "$SCRATCH_DESCRIPTION" \
+            --wait 15
+
+      # Check-only deploy with all local tests (the scratch org holds only this repo's code).
+      # validate, not deploy start, because it lists failed tests in its final report in CI.
+      # --concise shows only failures.
+      - name: Validate deploy and run Apex tests
+        run: |
+          sf project deploy validate \
+            --target-org "$SCRATCH_ALIAS" \
+            --source-dir force-app \
+            --test-level RunLocalTests \
+            --concise \
+            --coverage-formatters json-summary \
+            --junit \
+            --results-dir test-results \
+            --wait 20
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salesforce-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # Deletes the org through the Dev Hub by this run's description, so it also finds an
+      # org whose creation was interrupted after signup but before the CLI saved the alias.
+      # An org still being signed up isn't listed yet; it expires after 1 day.
+      # A cleanup error only warns: the validation result above is what the check reports.
+      - name: Delete scratch org
+        if: always()
+        continue-on-error: true
+        run: |
+          # Skip if the Dev Hub login never happened (alias list reads local config only).
+          if ! sf alias list --json \
+              | jq -e --arg alias "$DEVHUB_ALIAS" '.result[] | select(.alias == $alias)' > /dev/null; then
+            exit 0
+          fi
+          org_ids=$(sf data query \
+              --target-org "$DEVHUB_ALIAS" \
+              --query "SELECT Id, Description FROM ActiveScratchOrg" \
+              --json \
+            | jq -r --arg description "$SCRATCH_DESCRIPTION" \
+              '.result.records[] | select(.Description == $description) | .Id')
+          for org_id in $org_ids; do
+            sf data delete record \
+              --target-org "$DEVHUB_ALIAS" \
+              --sobject ActiveScratchOrg \
+              --record-id "$org_id"
+          done

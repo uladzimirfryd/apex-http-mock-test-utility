@@ -188,6 +188,12 @@ sf project deploy validate \
     --target-org <your-org>
 ```
 
+Pull requests are validated the same way in a fresh scratch org by
+[`salesforce-pr-validation.yml`](.github/workflows/salesforce-pr-validation.yml), after a PMD scan; drafts
+are skipped. GitHub doesn't pass the Dev Hub secrets to pull requests from forks, so the check fails for
+them with a message saying so, and a maintainer validates the change by pushing the branch to this
+repository.
+
 ## License
 
 [MIT](LICENSE)
